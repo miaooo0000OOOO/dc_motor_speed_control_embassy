@@ -1,0 +1,20 @@
+# Rust build artifacts
+/target/
+
+# Cargo lock (optional for libraries, keep for binaries)
+# Uncomment the next line if you want to ignore Cargo.lock
+# /Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+*~
+*.swp
+*.swo
