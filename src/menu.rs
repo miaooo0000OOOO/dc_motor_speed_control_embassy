@@ -3,6 +3,11 @@ use crate::font::{F6X8, F8X16};
 use crate::keypad::{Key, KeyEvent};
 use crate::sh1106::Sh1106;
 
+/// 速度控制时，每次按键增减的设定值步长（rpm）
+const SPEED_SETPOINT_STEP: f32 = 5.0;
+/// PI 参数在线调参步长
+const PID_TUNE_STEP: f32 = 0.05;
+
 /// 顶层菜单模式
 #[derive(Clone, Copy, PartialEq)]
 pub enum TopMode {
@@ -31,24 +36,27 @@ pub struct AppState {
     pub speed_sub: SpeedSubMode,
     pub setpoint: f32,        // rpm
     pub actual: f32,          // rpm
-    pub pwm_duty: i32,        // -100 ~ 100
+    pub pwm_duty: f32,        // -100.0 ~ 100.0
     pub step_hold_speed: f32, // 进入阶跃模式时的转速
     pub p_val: f32,
     pub i_val: f32,
     pub d_val: f32,
     pub pid_sel: PidParam,
+    /// 当前警告信息（空字符串表示无警告）
+    pub warning: &'static str,
 
     // ---- 上一次绘制的状态，用于局部刷新 ----
     last_top_mode: TopMode,
     last_speed_sub: SpeedSubMode,
     last_setpoint: f32,
     last_actual: f32,
-    last_pwm_duty: i32,
+    last_pwm_duty: f32,
     last_step_hold_speed: f32,
     last_p_val: f32,
     last_i_val: f32,
     last_d_val: f32,
     last_pid_sel: PidParam,
+    last_warning: &'static str,
     first_draw: bool,
 }
 
@@ -59,23 +67,25 @@ impl AppState {
             speed_sub: SpeedSubMode::Following,
             setpoint: 100.0,
             actual: 0.0,
-            pwm_duty: 0,
+            pwm_duty: 0.0,
             step_hold_speed: 0.0,
             p_val: 1.0,
             i_val: 0.1,
             d_val: 0.0,
             pid_sel: PidParam::P,
+            warning: "",
             // 初始值与 last 不同，确保第一次强制全量绘制
             last_top_mode: TopMode::Pi,
             last_speed_sub: SpeedSubMode::Step,
             last_setpoint: -1.0,
             last_actual: -1.0,
-            last_pwm_duty: -1,
+            last_pwm_duty: -1.0,
             last_step_hold_speed: -1.0,
             last_p_val: -1.0,
             last_i_val: -1.0,
             last_d_val: -1.0,
             last_pid_sel: PidParam::D,
+            last_warning: "!",
             first_draw: true,
         }
     }
@@ -91,12 +101,12 @@ impl AppState {
     fn handle_speed_event(&mut self, ev: KeyEvent) {
         match ev {
             KeyEvent::Pressed(Key::K1) => {
-                self.setpoint += 10.0;
-                defmt::info!("Setpoint +10 => {} rpm", self.setpoint);
+                self.setpoint += SPEED_SETPOINT_STEP;
+                defmt::info!("Setpoint +{} => {} rpm", SPEED_SETPOINT_STEP, self.setpoint);
             }
             KeyEvent::Pressed(Key::K2) => {
-                self.setpoint -= 10.0;
-                defmt::info!("Setpoint -10 => {} rpm", self.setpoint);
+                self.setpoint -= SPEED_SETPOINT_STEP;
+                defmt::info!("Setpoint -{} => {} rpm", SPEED_SETPOINT_STEP, self.setpoint);
             }
             KeyEvent::Pressed(Key::K3) => {
                 if self.speed_sub == SpeedSubMode::Step {
@@ -126,41 +136,41 @@ impl AppState {
             KeyEvent::Pressed(Key::K1) => {
                 match self.pid_sel {
                     PidParam::P => {
-                        self.p_val += 0.1;
-                        defmt::info!("P +0.1 => {}", self.p_val);
+                        self.p_val += PID_TUNE_STEP;
+                        defmt::info!("P +{} => {}", PID_TUNE_STEP, self.p_val);
                     }
                     PidParam::I => {
-                        self.i_val += 0.1;
-                        defmt::info!("I +0.1 => {}", self.i_val);
+                        self.i_val += PID_TUNE_STEP;
+                        defmt::info!("I +{} => {}", PID_TUNE_STEP, self.i_val);
                     }
                     PidParam::D => {
-                        self.d_val += 0.1;
-                        defmt::info!("D +0.1 => {}", self.d_val);
+                        self.d_val += PID_TUNE_STEP;
+                        defmt::info!("D +{} => {}", PID_TUNE_STEP, self.d_val);
                     }
                 }
             }
             KeyEvent::Pressed(Key::K2) => {
                 match self.pid_sel {
                     PidParam::P => {
-                        self.p_val -= 0.1;
+                        self.p_val -= PID_TUNE_STEP;
                         if self.p_val < 0.0 {
                             self.p_val = 0.0;
                         }
-                        defmt::info!("P -0.1 => {}", self.p_val);
+                        defmt::info!("P -{} => {}", PID_TUNE_STEP, self.p_val);
                     }
                     PidParam::I => {
-                        self.i_val -= 0.1;
+                        self.i_val -= PID_TUNE_STEP;
                         if self.i_val < 0.0 {
                             self.i_val = 0.0;
                         }
-                        defmt::info!("I -0.1 => {}", self.i_val);
+                        defmt::info!("I -{} => {}", PID_TUNE_STEP, self.i_val);
                     }
                     PidParam::D => {
-                        self.d_val -= 0.1;
+                        self.d_val -= PID_TUNE_STEP;
                         if self.d_val < 0.0 {
                             self.d_val = 0.0;
                         }
-                        defmt::info!("D -0.1 => {}", self.d_val);
+                        defmt::info!("D -{} => {}", PID_TUNE_STEP, self.d_val);
                     }
                 }
             }
@@ -231,6 +241,7 @@ impl AppState {
         self.last_i_val = self.i_val;
         self.last_d_val = self.d_val;
         self.last_pid_sel = self.pid_sel;
+        self.last_warning = self.warning;
         self.first_draw = false;
     }
 
@@ -251,16 +262,23 @@ impl AppState {
         oled.draw_string_6x8(3, 0, &buf, &F6X8);
 
         buf.clear();
-        let _ = write!(buf, "PWM:{:4}%", self.pwm_duty);
+        let _ = write!(buf, "PWM:{:5.1}%", self.pwm_duty);
         oled.draw_string_6x8(4, 0, &buf, &F6X8);
 
+        // page 5: warning
+        if !self.warning.is_empty() {
+            oled.draw_string_6x8(5, 0, self.warning, &F6X8);
+        }
+
+        // page 6: HOLD（Step 模式）
         if self.speed_sub == SpeedSubMode::Step {
             buf.clear();
             let _ = write!(buf, "HOLD:{:5.1}rpm", self.step_hold_speed);
-            oled.draw_string_6x8(5, 0, &buf, &F6X8);
+            oled.draw_string_6x8(6, 0, &buf, &F6X8);
         }
 
-        oled.draw_string_6x8(6, 0, "S1+ S2- S3 OK S4 STEP", &F6X8);
+        // page 7: 按键提示（常驻底行）
+        oled.draw_string_6x8(7, 0, "S1+ S2- S3 OK S4 STEP", &F6X8);
     }
 
     // ---------------- Speed 菜单：局部刷新 ----------------
@@ -297,19 +315,27 @@ impl AppState {
 
         // PWM line: page 4
         if self.pwm_duty != self.last_pwm_duty {
-            oled.clear_cols(4, 0, 60);
-            let _ = write!(buf, "PWM:{:4}%", self.pwm_duty);
+            oled.clear_cols(4, 0, 70);
+            let _ = write!(buf, "PWM:{:5.1}%", self.pwm_duty);
             oled.draw_string_6x8(4, 0, &buf, &F6X8);
             buf.clear();
         }
 
-        // HOLD line: page 5 —— 仅在 Step 模式或从 Step 退出时处理
+        // Warning line: page 5
+        if self.warning != self.last_warning {
+            oled.clear_cols(5, 0, 128);
+            if !self.warning.is_empty() {
+                oled.draw_string_6x8(5, 0, self.warning, &F6X8);
+            }
+        }
+
+        // HOLD line: page 6 —— 仅在 Step 模式或从 Step 退出时处理
         if self.speed_sub != self.last_speed_sub || self.step_hold_speed != self.last_step_hold_speed
         {
-            oled.clear_cols(5, 0, 80); // "HOLD:xxxxrpm" ≤ 12×6 = 72 px
+            oled.clear_cols(6, 0, 80); // "HOLD:xxxxrpm" ≤ 12×6 = 72 px
             if self.speed_sub == SpeedSubMode::Step {
                 let _ = write!(buf, "HOLD:{:5.1}rpm", self.step_hold_speed);
-                oled.draw_string_6x8(5, 0, &buf, &F6X8);
+                oled.draw_string_6x8(6, 0, &buf, &F6X8);
             }
         }
     }
@@ -320,17 +346,17 @@ impl AppState {
 
         let mut buf = heapless::String::<32>::new();
         let p_marker = if self.pid_sel == PidParam::P { ">" } else { " " };
-        let _ = write!(buf, "{}P:{:.1}", p_marker, self.p_val);
+        let _ = write!(buf, "{}P:{:.2}", p_marker, self.p_val);
         oled.draw_string_6x8(2, 0, &buf, &F6X8);
 
         buf.clear();
         let i_marker = if self.pid_sel == PidParam::I { ">" } else { " " };
-        let _ = write!(buf, "{}I:{:.1}", i_marker, self.i_val);
+        let _ = write!(buf, "{}I:{:.2}", i_marker, self.i_val);
         oled.draw_string_6x8(3, 0, &buf, &F6X8);
 
         buf.clear();
         let d_marker = if self.pid_sel == PidParam::D { ">" } else { " " };
-        let _ = write!(buf, "{}D:{:.1}", d_marker, self.d_val);
+        let _ = write!(buf, "{}D:{:.2}", d_marker, self.d_val);
         oled.draw_string_6x8(4, 0, &buf, &F6X8);
 
         oled.draw_string_6x8(6, 0, "S1+ S2- S3 SPD S4 SEL", &F6X8);
@@ -344,7 +370,7 @@ impl AppState {
         if self.p_val != self.last_p_val || self.pid_sel != self.last_pid_sel {
             oled.clear_cols(2, 0, 50);
             let p_marker = if self.pid_sel == PidParam::P { ">" } else { " " };
-            let _ = write!(buf, "{}P:{:.1}", p_marker, self.p_val);
+            let _ = write!(buf, "{}P:{:.2}", p_marker, self.p_val);
             oled.draw_string_6x8(2, 0, &buf, &F6X8);
             buf.clear();
         }
@@ -353,7 +379,7 @@ impl AppState {
         if self.i_val != self.last_i_val || self.pid_sel != self.last_pid_sel {
             oled.clear_cols(3, 0, 50);
             let i_marker = if self.pid_sel == PidParam::I { ">" } else { " " };
-            let _ = write!(buf, "{}I:{:.1}", i_marker, self.i_val);
+            let _ = write!(buf, "{}I:{:.2}", i_marker, self.i_val);
             oled.draw_string_6x8(3, 0, &buf, &F6X8);
             buf.clear();
         }
@@ -362,7 +388,7 @@ impl AppState {
         if self.d_val != self.last_d_val || self.pid_sel != self.last_pid_sel {
             oled.clear_cols(4, 0, 50);
             let d_marker = if self.pid_sel == PidParam::D { ">" } else { " " };
-            let _ = write!(buf, "{}D:{:.1}", d_marker, self.d_val);
+            let _ = write!(buf, "{}D:{:.2}", d_marker, self.d_val);
             oled.draw_string_6x8(4, 0, &buf, &F6X8);
         }
     }

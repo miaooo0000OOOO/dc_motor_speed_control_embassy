@@ -2,6 +2,7 @@
 name = "dc_motor_speed_control_embassy"
 version = "0.1.0"
 edition = "2021"
+default-run = "dc_motor_speed_control_embassy"
 
 [dependencies]
 embassy-stm32 = { version = "0.6.0", features = ["stm32f103c8", "memory-x", "time-driver-any", "exti", "defmt", "unstable-pac"] }

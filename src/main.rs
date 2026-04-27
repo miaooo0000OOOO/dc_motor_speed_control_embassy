@@ -20,23 +20,26 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 
+use dc_motor_speed_control_embassy::controller::CompositeController;
 use dc_motor_speed_control_embassy::font::{F6X8, F8X16};
 use dc_motor_speed_control_embassy::keypad::Keypad;
 use dc_motor_speed_control_embassy::menu::AppState;
-use dc_motor_speed_control_embassy::pid::{DerivativeMode, Pid};
 use dc_motor_speed_control_embassy::sh1106::Sh1106;
 use {defmt_rtt as _, panic_probe as _};
 
 /// 编码器每转计数值（11线 × 4倍频 × 21减速比）
 const COUNTS_PER_REV: f32 = (11 * 21 * 4) as f32; // 924.0
 /// 控制周期
-const CONTROL_PERIOD_MS: u64 = 100;
-/// PID 采样周期（秒），由控制周期编译期计算得到
-const TS_S: f32 = (CONTROL_PERIOD_MS as f32) / 1000.0;
-/// PID 初始参数（唯一真值源）
-const PID_KP: f32 = 0.5;
-const PID_KI: f32 = 0.4;
+const CONTROL_PERIOD_MS: u64 = 200;
+/// PI 初始参数（唯一真值源）
+/// 注：引入前馈后，反馈增益可显著降低，因前馈已承担稳态与线性化工作
+const PID_KP: f32 = 0.3;
+const PID_KI: f32 = 0.15;
 const PID_KD: f32 = 0.0;
+/// 死区转速边界（rpm），实测 ±14
+const DEAD_ZONE_RPM: f32 = 14.0;
+/// 最大允许转速（rpm），电机空载 201 RPM
+const MAX_SPEED_RPM: f32 = 200.0;
 
 /// 全局应用状态（OLED 菜单、设定值、PI 参数等）
 static APP_STATE: Mutex<CriticalSectionRawMutex, AppState> = Mutex::new(AppState::new());
@@ -105,18 +108,15 @@ async fn main(spawner: Spawner) {
     let mut oled = Sh1106::new(i2c);
     oled.init();
     oled.clear();
-    oled.draw_string_8x16(0, 0, "DC MOTOR PID", &F8X16);
+    oled.draw_string_8x16(0, 0, "DC MOTOR FF-FB", &F8X16);
     oled.draw_string_6x8(2, 0, "Initializing...", &F6X8);
     Timer::after_millis(500).await;
 
     // ── 键盘初始化 ──
     let keypad = Keypad::new(p.PA3, p.PA4, p.PA5, p.PA6);
 
-    // ── PID 初始化 ──
-    let pid = Pid::new(PID_KP, PID_KI, PID_KD)
-        .with_sample_time(TS_S)
-        .with_output_limits(-100.0, 100.0)
-        .with_derivative_mode(DerivativeMode::OnFeedback);
+    // ── 复合控制器初始化（前馈 + PI）──
+    let controller = CompositeController::with_gains(PID_KP, PID_KI, PID_KD);
 
     // 同步 PID 初始参数到共享状态，避免 menu.rs 与 main.rs 重复定义
     {
@@ -127,7 +127,7 @@ async fn main(spawner: Spawner) {
     }
 
     // ── 启动任务 ──
-    spawner.spawn(control_task(qei, channels, pid)).ok();
+    spawner.spawn(control_task(qei, channels, controller)).ok();
     spawner.spawn(display_task(oled)).ok();
     spawner.spawn(keypad_task(keypad)).ok();
 
@@ -139,15 +139,16 @@ async fn main(spawner: Spawner) {
     }
 }
 
-/// 控制任务：编码器测速 → PID → PWM 输出
+/// 控制任务：编码器测速 → 前馈-反馈复合控制 → PWM 输出
 #[embassy_executor::task]
 async fn control_task(
     qei: Qei<'static, TIM1>,
     mut channels: SimplePwmChannels<'static, TIM2>,
-    mut pid: Pid,
+    mut controller: CompositeController,
 ) {
     let mut last_count: u16 = qei.count();
     let mut last_time: u64 = Instant::now().as_micros();
+    let mut last_setpoint_sign: f32 = 0.0; // 用于方向切换检测
     let mut ticker = Ticker::every(Duration::from_millis(CONTROL_PERIOD_MS));
 
     loop {
@@ -177,27 +178,54 @@ async fn control_task(
         };
         let feedback = rpm;
 
-        // 动态更新 PID 参数（支持在线调参）
-        pid.set_kp(state.p_val);
-        pid.set_ki(state.i_val);
-        pid.set_kd(state.d_val);
+        // 动态更新 PI 参数（支持在线调参）
+        controller.set_pid_gains(state.p_val, state.i_val, state.d_val);
 
-        let control = pid.compute(setpoint, feedback);
-        let duty = control as i32;
+        // ── 方向切换保护：设定值由正变负或反之，立即清空积分防止跨象限饱和 ──
+        let current_sign = if setpoint > 0.0 {
+            1.0
+        } else if setpoint < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        if last_setpoint_sign != 0.0
+            && current_sign != 0.0
+            && last_setpoint_sign != current_sign
+        {
+            controller.reset();
+        }
+        last_setpoint_sign = current_sign;
+
+        // ── 死区判断、超速提示、复合控制计算 ──
+        let (duty, warning) = if setpoint.abs() < DEAD_ZONE_RPM {
+            // 死区内：直接输出 0，并清空控制器积分防止饱和
+            controller.reset();
+            (0.0, "IN DEAD ZONE")
+        } else {
+            let duty_total = controller.compute(setpoint, feedback);
+            let w = if setpoint.abs() > MAX_SPEED_RPM {
+                "OVER SPEED"
+            } else {
+                ""
+            };
+            (duty_total, w)
+        };
+
         state.pwm_duty = duty;
+        state.warning = warning;
         drop(state);
 
         // ── 输出 PWM ──
         let ch3_pwm = &mut channels.ch3;
         let ch4_pwm = &mut channels.ch4;
         let max_duty = ch3_pwm.max_duty_cycle();
-        let duty_abs = duty.unsigned_abs() as u32;
-        let compare = duty_abs.saturating_mul(max_duty) / 100;
+        let compare = ((duty.abs() / 100.0) * max_duty as f32) as u32;
 
-        if duty > 0 {
+        if duty > 0.0 {
             ch3_pwm.set_duty_cycle(compare);
             ch4_pwm.set_duty_cycle(0);
-        } else if duty < 0 {
+        } else if duty < 0.0 {
             ch3_pwm.set_duty_cycle(0);
             ch4_pwm.set_duty_cycle(compare);
         } else {
@@ -205,7 +233,12 @@ async fn control_task(
             ch4_pwm.set_duty_cycle(0);
         }
 
-        defmt::info!("sp={} rpm, pv={} rpm, duty={}%", setpoint as i32, rpm, duty);
+        defmt::info!(
+            "sp={} rpm, pv={} rpm, duty={}%",
+            setpoint as i32,
+            rpm,
+            duty as i32
+        );
 
         last_count = count;
         last_time = time;

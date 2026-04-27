@@ -14,6 +14,9 @@
 .DS_Store
 Thumbs.db
 
+# Python
+scripts/__pycache__/
+
 # Backup files
 *~
 *.swp
