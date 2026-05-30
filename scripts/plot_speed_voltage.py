@@ -17,6 +17,13 @@ import sys
 
 import csv
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+
+# 使用微软雅黑
+fm.fontManager.addfont("/usr/local/share/fonts/truetype/微软雅黑.ttf")
+plt.rcParams['font.family'] = ['Microsoft YaHei', 'sans-serif']
+plt.rcParams['axes.unicode_minus'] = False
+
 import serial
 from collections import defaultdict
 
@@ -114,10 +121,10 @@ def plot(avg_data, path='speed_voltage.png'):
 
     # 主曲线：电压 vs 转速
     ax1.plot(
-        voltages, rpms, 'b-o', linewidth=2, markersize=6, label='Avg RPM (no-load)'
+        voltages, rpms, 'b-o', linewidth=2, markersize=6, label='平均转速 (空载)'
     )
-    ax1.set_xlabel('Voltage (V)', fontsize=12)
-    ax1.set_ylabel('Speed (RPM)', fontsize=12, color='b')
+    ax1.set_xlabel('电压 (V)', fontsize=12)
+    ax1.set_ylabel('转速 (RPM)', fontsize=12, color='b')
     ax1.tick_params(axis='y', labelcolor='b')
     ax1.grid(True, linestyle='--', alpha=0.6)
 
@@ -127,10 +134,10 @@ def plot(avg_data, path='speed_voltage.png'):
     tick_indices = list(range(0, len(voltages), max(1, len(voltages) // 10)))
     ax2.set_xticks([voltages[i] for i in tick_indices])
     ax2.set_xticklabels([f"{duties[i]}%" for i in tick_indices])
-    ax2.set_xlabel('Duty (%)', fontsize=12)
+    ax2.set_xlabel('占空比 (%)', fontsize=12)
 
     # 标题与图例
-    plt.title('No-Load Motor Speed vs Voltage\n(Multiple round-trip averaged)', fontsize=14)
+    plt.title('空载电机转速-电压特性\n(多轮往返平均)', fontsize=14)
     ax1.legend(loc='lower right')
     plt.tight_layout()
     plt.savefig(path, dpi=150)

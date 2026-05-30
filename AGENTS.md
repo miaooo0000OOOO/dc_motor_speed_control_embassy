@@ -95,7 +95,83 @@ OLED控制芯片 SH1106，参考: datasheets/Sinowealth-SH1106.pdf
 
 ASCII字体参考: ref/font.h
 
-### 五、电机死区特性（实测）
+### 五、空载转速-电压曲线测量（参考流程）
+
+> 测试程序：`src/bin/test_speed_voltage.rs` + 上位机 `scripts/plot_speed_voltage.py`
+
+### 测量方法
+1. **自动扫描**：MCU 从 0% 到 100% 以 5% 步长递增占空比，每点稳定 2s 后采集 5 次转速平均
+2. **往返扫描**：正向（0→100%）后立即反向（100→0%），共 3 轮，消除迟滞
+3. **电压折算**：100% 占空比对应电机端电压 11V，$V = \text{duty} \times 11 / 100$
+4. **数据处理**：上位机按 duty 分组取平均，保存 `speed_voltage.csv`
+
+### 逆模型拟合
+使用 `scripts/fit_piecewise_linear.py` 执行带约束的分段线性拟合：
+- 段 1（死区）：斜率强制为 0
+- 段 2、3：段间强制连续
+- 优化目标：最小化 MSE
+
+当前拟合结果（已写入 `src/controller.rs`）：
+- $V_1 = 1.872\ \text{V}$，$V_2 = 3.300\ \text{V}$
+- $K_2 = 27.0322\ \text{rpm/V}$，$K_3 = 19.1062\ \text{rpm/V}$
+
+---
+
+## 六、空载阶跃响应实验与电机参数辨识
+
+> 测试程序：`src/bin/test_step_response.rs` + 上位机 `scripts/collect_step_response.py` + `scripts/analyze_step_response.py`
+
+### 实验设计
+
+| 参数 | 取值 | 说明 |
+|------|------|------|
+| 采样周期 | 10 ms | τ 实测约 16 ms，10 ms 才能分辨上升沿 |
+| 阶跃前预稳态 | 300 ms | 确保电机完全静止 |
+| 阶跃后保持 | 800 ms | 约 50τ，足够进入稳态 |
+| 轮间停顿 | 1000 ms | 消除惯性、散热 |
+| 占空比水平 | 40%, 60%, 80%, 100% | 覆盖典型工作区，均高于死区 |
+| 每水平重复次数 | 5 次 | 用于统计分析和误差估计 |
+
+### 实验流程
+1. 烧录 `test_step_response`，通过 DAPLINK 串口连接 PC
+2. 运行 `python scripts/collect_step_response.py`，发送 `'S'` 启动
+3. MCU 自动执行全部 20 次（4 水平 × 5 次）阶跃实验
+4. 上位机保存 `step_response_data.json`（结构化数据）和 `step_response_data.csv`
+5. 运行 `python scripts/analyze_step_response.py` 进行统计分析与参数估计
+
+### 电机模型与参数估计
+
+**一阶空载模型**（扣除死区后）：
+$$
+\frac{\Omega(s)}{V_{\text{eff}}(s)} = \frac{K}{\tau s + 1}, \quad V_{\text{eff}} = V_{\text{applied}} - 2.2\ \text{V}
+$$
+
+**估计方法**：
+1. **稳态转速 ω_ss**：取阶跃后最后 1 秒均值
+2. **稳态增益 K**：$K = \omega_{ss} / V_{\text{eff}}$
+3. **时间常数 τ（63.2% 法）**：从转速首次超过 2 rpm 起，找到达到 $0.632\,\omega_{ss}$ 的时间
+4. **时间常数 τ（非线性最小二乘）**：用 `scipy.optimize.curve_fit` 拟合 $\omega(t)=\omega_{ss}(1-e^{-(t-t_0)/\tau})$，输出 $R^2$
+5. **最终结果**：跨所有 duty 水平的 K 和 τ 取平均，计算标准差和变异系数 CV
+
+### 参考输出示例
+```
+稳态增益 K = 23.4 ± 2.5 rpm/V  (CV = 10.6%)
+时间常数 τ = 17 ± 2 ms  (CV = 9.3%)
+           = 0.017 ± 0.002 s
+上升时间 t_rise(10%-90%) = 45 ± 5 ms  (CV = 11.1%)
+```
+
+> **注**：τ ≈ 17 ms ≪ 控制周期 Ts = 50 ms，电机动态在一个控制周期内已基本完成。
+
+### 生成图表
+- `step_response_overlaid.png`：多次实验原始曲线叠加
+- `step_response_mean_std.png`：均值 ± 1σ 置信带
+- `step_response_fit.png`：典型曲线与一阶拟合对比
+- `step_response_params.png`：K 与 τ 随电压变化汇总
+
+---
+
+## 七、电机死区特性（实测）
 
 > 测试程序：`src/bin/test_dead_zone.rs`，采用 **3 轮往返扫描取平均** 方法消除迟滞。
 
@@ -116,3 +192,116 @@ ASCII字体参考: ref/font.h
 **迟滞说明**
 
 电机+驱动器存在明显迟滞：正向启动边界（duty ≈ 19%）与正向停止边界（回程测得）存在差异，负向同理。最终死区值取 **去程启动边界与回程停止边界的中点**，并经多轮平均后得到上表结果。
+
+---
+
+## 八、PI 参数整定
+
+> 仿真脚本：`scripts/tune_pi_controller.py`
+
+### 被控对象模型
+
+基于阶跃响应辨识的一阶模型（扣除死区后，duty → rpm）：
+
+$$
+G_p(s) = \frac{K_{\text{plant}}}{\tau s + 1} = \frac{2.574}{0.017\,s + 1}\quad [\text{rpm}/\%]
+$$
+
+其中 $K_{\text{plant}} = (11\,\text{V}/100) \times 23.4\,\text{rpm/V} = 2.574\,\text{rpm}/\%$。
+
+### 整定方法
+
+采用 **IMC/Lambda 法**，取闭环时间常数 λ = Ts/2 = 0.025 s（Ts = 50 ms 为控制周期）。
+
+一阶系统 + PI 控制器的 IMC 解析解：
+- $K_p = \tau / (K_{\text{plant}} \cdot \lambda) = 0.017 / (2.574 \times 0.025) \approx 0.264$
+- $K_i = 1 / (K_{\text{plant}} \cdot \lambda) = 1 / (2.574 \times 0.025) \approx 15.540$
+
+### 整定结果对比
+
+| 方案 | Kp | Ki | 相位裕度 PM | 说明 |
+|------|-----|------|-----------|------|
+| 旧参数 | 0.300 | 0.150 | 140° | 过于保守，响应极慢 |
+| IMC λ=0.20s | 0.033 | 1.943 | 90° | 更鲁棒，响应慢 |
+| **IMC λ=0.025s（默认）** | **0.264** | **15.540** | **90°** | **推荐，平衡响应与鲁棒** |
+| IMC λ=0.05s | 0.132 | 7.770 | 90° | 更激进，更快响应 |
+
+### 关键结论
+
+1. τ = 17 ms ≪ Ts = 50 ms，电机动态在单个控制周期内已基本完成
+2. 前馈已承担稳态输出，反馈 PI 只需补偿误差和扰动
+3. 新默认参数（Kp=0.264, Ki=15.540）相位裕度 90°，相比旧参数（140°）响应更快，同时保持数字稳定性
+
+### 代码位置
+
+- `src/main.rs`：`PID_KP = 0.264`，`PID_KI = 15.540`
+- `src/controller.rs`：`CompositeController::new()` 默认参数
+- `src/menu.rs`：`PID_TUNE_STEP = 0.01`（在线调参步长）
+
+---
+
+## 九、闭环前馈-反馈阶跃响应 + 阶跃扰动实验
+
+> 测试程序：`src/bin/test_closed_loop.rs` + 上位机 `scripts/collect_closed_loop.py` + `scripts/analyze_closed_loop.py`
+
+### 实验目的
+
+1. **阶跃跟踪**：验证前馈-反馈复合控制器在不同设定值下的动态跟踪性能
+2. **扰动抑制**：量化闭环系统对外部等效负载扰动的抑制能力
+
+### 实验设计
+
+| 参数 | 取值 | 说明 |
+|------|------|------|
+| 数据采样周期 | 10 ms | 与开环阶跃实验保持一致 |
+| 控制周期 | 50 ms | 与主程序一致，PI 参数无需换算 |
+| 阶跃前预稳态 | 300 ms | 确保电机静止 |
+| 阶跃后保持 | 1200 ms | 约 70τ，覆盖完整调节过程 |
+| 设定值水平 | 60, 100, 140 rpm | 覆盖低/中/高速，均高于死区 |
+| 扰动基础转速 | 100 rpm | 典型工作点 |
+| 扰动幅度 | +8% 占空比 | 等效负载突变（避免空载过驱动） |
+| 扰动持续时间 | 500 ms | 足够观察稳态偏差 |
+| 每条件重复次数 | 5 次 | 用于统计平均与误差估计 |
+
+### 实验流程
+
+1. 烧录 `test_closed_loop`，通过 DAPLINK 串口连接 PC
+2. 运行 `python scripts/collect_closed_loop.py`，发送 `'C'` 启动
+3. MCU 自动执行全部 20 次实验（3 阶跃水平 × 5 次 + 5 次扰动）
+4. 上位机保存 `closed_loop_data.json` 与 `closed_loop_data.csv`
+5. 运行 `python scripts/analyze_closed_loop.py <json_path>` 生成图表与报告
+
+### 评价指标
+
+**阶跃跟踪**：
+- 上升时间 t_rise（10%-90%）
+- 调节时间 t_s（±5% 误差带）
+- 超调量 σ
+- 稳态误差 e_ss
+
+**扰动抑制**：
+- 最大转速偏差 Δω_max
+- 恢复时间 t_recover（扰动撤销后回到 ±5% 带）
+- 反馈补偿峰值 |u_fb|_max
+
+### 参考指标（基于仿真验证）
+
+| 设定值 | t_rise | t_s | σ | e_ss |
+|--------|--------|-----|---|------|
+| 60 rpm | ~30 ms | ~420 ms | ~13% | ≈0 |
+| 100 rpm | ~30 ms | ~380 ms | ~15% | ≈0 |
+| 140 rpm | ~20 ms | ~380 ms | ~14% | ≈0 |
+
+扰动（+8% duty @ 100 rpm）：Δω_max ≈ 16.5 rpm，t_recover ≈ 30 ms
+
+### 关键结论
+
+1. **前馈-反馈架构有效**：前馈承担稳态输出，反馈仅补偿误差与扰动
+2. **超调来源**：前馈阶跃 + 比例项初始冲击，可通过设定值斜坡或降低 Kp 进一步抑制
+3. **扰动抑制能力可量化**：为后续加载真实负载后的参数优化提供定量基准
+
+### 代码位置
+
+- `src/bin/test_closed_loop.rs`：闭环实验固件
+- `scripts/collect_closed_loop.py`：上位机数据采集
+- `scripts/analyze_closed_loop.py`：数据分析与报告生成

@@ -20,6 +20,13 @@ import csv
 import sys
 
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+
+# 使用微软雅黑
+fm.fontManager.addfont("/usr/local/share/fonts/truetype/微软雅黑.ttf")
+plt.rcParams['font.family'] = ['Microsoft YaHei', 'sans-serif']
+plt.rcParams['axes.unicode_minus'] = False
+
 import numpy as np
 
 
@@ -180,21 +187,21 @@ def plot(params, data, save_path='fit_piecewise_linear.png'):
 
     voltages = np.array([d['voltage'] for d in data])
     rpms = np.array([d['rpm'] for d in data])
-    ax.scatter(voltages, rpms, c='blue', s=80, zorder=3, label='Measured data')
+    ax.scatter(voltages, rpms, c='blue', s=80, zorder=3, label='实测数据')
 
     xs_fine = np.linspace(0, max(voltages) * 1.02, 500)
     ys_fine = piecewise_model(params, xs_fine)
-    ax.plot(xs_fine, ys_fine, 'r-', linewidth=2.5, label='Fitted polyline', zorder=2)
+    ax.plot(xs_fine, ys_fine, 'r-', linewidth=2.5, label='拟合折线', zorder=2)
 
     ax.axvline(x=v1, color='gray', linestyle='--', alpha=0.7, label=f'V1={v1:.2f}V')
     ax.axvline(x=v2, color='gray', linestyle=':', alpha=0.7, label=f'V2={v2:.2f}V')
 
     ax.fill_between([0, v1], 0, ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 50,
-                    alpha=0.1, color='red', label='Dead zone')
+                    alpha=0.1, color='red', label='死区')
 
-    ax.set_xlabel('Voltage (V)', fontsize=12)
-    ax.set_ylabel('Speed (RPM)', fontsize=12)
-    ax.set_title('Constrained Piecewise Linear Fit: Speed vs Voltage\n(k1=0, continuous joints)', fontsize=14)
+    ax.set_xlabel('电压 (V)', fontsize=12)
+    ax.set_ylabel('转速 (RPM)', fontsize=12)
+    ax.set_title('带约束分段线性拟合：转速-电压特性\n(k1=0, 连续节点)', fontsize=14)
     ax.legend(loc='lower right')
     ax.grid(True, linestyle='--', alpha=0.5)
     plt.tight_layout()
