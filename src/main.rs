@@ -30,11 +30,14 @@ use {defmt_rtt as _, panic_probe as _};
 /// 编码器每转计数值（11线 × 4倍频 × 21减速比）
 const COUNTS_PER_REV: f32 = (11 * 21 * 4) as f32; // 924.0
 /// 控制周期
-const CONTROL_PERIOD_MS: u64 = 200;
+const CONTROL_PERIOD_MS: u64 = 50;
 /// PI 初始参数（唯一真值源）
 /// 注：引入前馈后，反馈增益可显著降低，因前馈已承担稳态与线性化工作
-const PID_KP: f32 = 0.3;
-const PID_KI: f32 = 0.15;
+// PI gains tuned via IMC/Lambda method (lambda = 0.05s = Ts)
+// Based on measured plant: Gp(s) = 2.574 / (0.017*s + 1), Ts = 50ms
+// Note: increased lambda from Ts/2 to Ts due to measurement noise
+const PID_KP: f32 = 0.132;
+const PID_KI: f32 = 7.770;
 const PID_KD: f32 = 0.0;
 /// 死区转速边界（rpm），实测 ±14
 const DEAD_ZONE_RPM: f32 = 14.0;
@@ -149,6 +152,8 @@ async fn control_task(
     let mut last_count: u16 = qei.count();
     let mut last_time: u64 = Instant::now().as_micros();
     let mut last_setpoint_sign: f32 = 0.0; // 用于方向切换检测
+    let mut prev_rpm: f32 = 0.0;
+    const SPEED_FILTER_ALPHA: f32 = 0.6; // 一阶低通滤波系数
     let mut ticker = Ticker::every(Duration::from_millis(CONTROL_PERIOD_MS));
 
     loop {
@@ -161,11 +166,15 @@ async fn control_task(
         let delta_count = count.wrapping_sub(last_count) as i16 as i32;
         let delta_time = time.wrapping_sub(last_time);
 
-        let rpm = if delta_time > 0 {
+        let raw_rpm = if delta_time > 0 {
             (delta_count as f32 * 1_000_000.0 * 60.0) / (COUNTS_PER_REV * delta_time as f32)
         } else {
             0.0
         };
+
+        // 一阶低通滤波：抑制 M/T 法测速噪声
+        let rpm = SPEED_FILTER_ALPHA * raw_rpm + (1.0 - SPEED_FILTER_ALPHA) * prev_rpm;
+        prev_rpm = rpm;
 
         let mut state = APP_STATE.lock().await;
         state.actual = rpm;

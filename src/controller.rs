@@ -7,11 +7,11 @@ use crate::pid::{DerivativeMode, Pid};
 //   段 2 [V1,  V2]      : rpm = K2 * (V - V1)
 //   段 3 [V2,  V_MAX]   : rpm = K2*(V2-V1) + K3*(V-V2)
 // ═══════════════════════════════════════════════════════════════════════════
-const INV_V1: f32 = 1.870;      // V
+const INV_V1: f32 = 1.872;      // V
 const INV_V2: f32 = 3.300;      // V
-const INV_K2: f32 = 26.9481;    // rpm/V
-const INV_K3: f32 = 19.0659;    // rpm/V
-const INV_RPM2: f32 = 38.54;    // K2 * (V2 - V1)，段 2/3 分界转速
+const INV_K2: f32 = 27.0322;    // rpm/V
+const INV_K3: f32 = 21.0;    // rpm/V
+const INV_RPM2: f32 = 38.61;    // K2 * (V2 - V1)，段 2/3 分界转速
 
 /// 100% 占空比时电机端实测电压（V）
 const MOTOR_V_MAX: f32 = 11.0;
@@ -32,9 +32,13 @@ pub struct CompositeController {
 
 impl CompositeController {
     /// 创建复合控制器，使用默认 PI 参数
+    ///
+    /// 默认值基于 IMC/Lambda 整定（lambda = 0.05s = Ts），
+    /// 对应被控对象 Gp(s) = 2.574 / (0.017*s + 1)，控制周期 Ts = 50 ms。
+    /// 取 lambda = Ts 而非 Ts/2，以降低测量噪声引起的振荡。
     pub fn new() -> Self {
-        let pid = Pid::new(0.3, 0.15, 0.0)
-            .with_sample_time(0.2)
+        let pid = Pid::new(0.132, 7.770, 0.0)
+            .with_sample_time(0.05)
             .with_integral_limits(-30.0, 30.0)
             .with_output_limits(-100.0, 100.0)
             .with_derivative_mode(DerivativeMode::OnFeedback)

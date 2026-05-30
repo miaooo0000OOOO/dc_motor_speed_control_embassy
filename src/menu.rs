@@ -6,7 +6,7 @@ use crate::sh1106::Sh1106;
 /// 速度控制时，每次按键增减的设定值步长（rpm）
 const SPEED_SETPOINT_STEP: f32 = 5.0;
 /// PI 参数在线调参步长
-const PID_TUNE_STEP: f32 = 0.05;
+const PID_TUNE_STEP: f32 = 0.01;
 
 /// 顶层菜单模式
 #[derive(Clone, Copy, PartialEq)]

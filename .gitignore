@@ -17,6 +17,13 @@ Thumbs.db
 # Python
 scripts/__pycache__/
 
+# Experiment data
+step_response/
+step_response_*/
+step_response_demo/
+closed_loop_*/
+unused/
+
 # Backup files
 *~
 *.swp
